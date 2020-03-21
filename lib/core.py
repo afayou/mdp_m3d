@@ -570,14 +570,14 @@ def next_iteration(loader, iterator):
 
     # next batch
     try:
-        inputs, images, imobjs = next(iterator)
+        images, imobjs = next(iterator)
 
     # new epoch / shuffle
     except StopIteration:
         iterator = iter(loader)
-        inputs, images, imobjs = next(iterator)
+        images, imobjs = next(iterator)
 
-    return iterator, inputs, images, imobjs
+    return iterator, images, imobjs
 
 
 def init_training_paths(conf_name, use_tmp_folder=None):

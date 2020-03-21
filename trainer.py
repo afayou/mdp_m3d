@@ -144,30 +144,26 @@ class Trainer:
 
         num_train_samples = len(train_filenames)
         self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
-        conf_name = 'kitti_3d_multi_warmup'
-        self.conf = init_config(conf_name)
-        self.paths = init_training_paths(conf_name)
-
-
-        # self.loader = torch.utils.data.DataLoader(self, conf.batch_size, sampler=self.sampler, collate_fn=self.collate)
 
         train_dataset = self.dataset(
             self.opt.data_path, train_filenames, self.opt.height, self.opt.width,
-            self.opt.frame_ids, 4, self.conf, self.paths.data, self.paths.output, is_train=True, img_ext=img_ext)
-        # # setup sampler and data loader for this dataset
-        # self.sampler = torch.utils.data.sampler.WeightedRandomSampler(balance_samples(self.conf, train_dataset.imdb), train_dataset.len)
+            self.opt.frame_ids, 4, is_train=True, img_ext=img_ext)
         self.train_loader = DataLoader(
             train_dataset, self.opt.batch_size, True,
-            num_workers=self.opt.num_workers, pin_memory=True, drop_last=True, collate_fn=train_dataset.collate)
+            num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
 
         val_dataset = self.dataset(
             self.opt.data_path, val_filenames, self.opt.height, self.opt.width,
-            self.opt.frame_ids, 4, self.conf, self.paths.data, self. paths.output, is_train=False, img_ext=img_ext)
+            self.opt.frame_ids, 4, is_train=False, img_ext=img_ext)
         self.val_loader = DataLoader(
             val_dataset, self.opt.batch_size, True,
             num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
         self.val_iter = iter(self.val_loader)
-
+        self.custom_index = 0
+        conf_name = 'kitti_3d_multi_warmup'
+        self.conf = init_config(conf_name)
+        self.paths = init_training_paths(conf_name)
+        self.m3d_dataset = Dataset(self.opt.batch_size, self.conf, self.paths.data, self.paths.output)
         print('m3d_mrp')
         # init_torch(conf.rng_seed, conf.cuda_seed)
         init_log_file(self.paths.logs)
@@ -177,8 +173,8 @@ class Trainer:
         self.tracker = edict()
         self.iterator = None
 
-        generate_anchors(self.conf, train_dataset.imdb, self.paths.output)
-        compute_bbox_stats(self.conf, train_dataset.imdb, self.paths.output)
+        generate_anchors(self.conf, self.m3d_dataset.imdb, self.paths.output)
+        compute_bbox_stats(self.conf, self.m3d_dataset.imdb, self.paths.output)
         # store configuration
         pickle_write(os.path.join(self.paths.output, 'conf.pkl'), self.conf)
 
@@ -194,10 +190,13 @@ class Trainer:
 
         # setup loss
         self.criterion_det = RPN_3D_loss(self.conf)
+
         freeze_blacklist = None if 'freeze_blacklist' not in self.conf else self.conf.freeze_blacklist
         freeze_whitelist = None if 'freeze_whitelist' not in self.conf else self.conf.freeze_whitelist
 
         freeze_layers(self.rpn_net, freeze_blacklist, freeze_whitelist)
+
+
         self.writers = {}
         for mode in ["train", "val"]:
             self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
@@ -245,56 +244,8 @@ class Trainer:
         self.epoch = 0
         self.step = 0
         self.start_time = time.time()
-        for iteration in range(0, self.conf.max_iter):
-            self.iterator, inputs, images, imobjs = next_iteration(self.train_loader, self.iterator)
-            #  learning rate
-            adjust_lr(self.conf, self.optimizer, iteration)
-
-            # forward
-            self.cls, self.prob, self.bbox_2d, self.bbox_3d, self.feat_size = self.rpn_net(images)
-
-            # loss
-            self.det_loss, self.det_stats = self.criterion_det(self.cls, self.prob, self.bbox_2d, self.bbox_3d, imobjs, self.feat_size)
-
-            self.m3d_loss = self.det_loss
-            self.m3d_loss = 0
-            self.stats = self.det_stats
-
-            # backprop
-            if self.m3d_loss > 0:
-
-                self.m3d_loss.backward()
-
-                # # batch skip, simulates larger batches by skipping gradient step
-                # if (not 'batch_skip' in self.conf) or ((batch_idx + 1) % self.conf.batch_skip) == 0:
-                #     self.optimizer.step()
-                #     self.optimizer.zero_grad()
-
-            before_op_time = time.time()
-
-            outputs, losses = self.process_batch(inputs, self.m3d_loss)
-
-            self.model_optimizer.zero_grad()
-            losses["loss"].backward()
-            self.model_optimizer.step()
-
-            duration = time.time() - before_op_time
-
-            # log less frequently after the first 2000 steps to save time & disk space
-            early_phase = iteration % self.opt.log_frequency == 0 and self.step < 2000
-            late_phase = self.step % 2000 == 0
-
-            if early_phase or late_phase:
-                self.log_time(iteration, duration, losses["loss"].cpu().data, self.m3d_loss)
-
-                if "depth_gt" in inputs:
-                    self.compute_depth_losses(inputs, outputs, losses)
-
-                self.log("train", inputs, outputs, losses)
-                self.val()
-
-            self.step += 1
-            # self.run_epoch()
+        for self.epoch in range(self.opt.num_epochs):
+            self.run_epoch()
             if (self.epoch + 1) % self.opt.save_frequency == 0:
                 self.save_model()
 
@@ -305,37 +256,25 @@ class Trainer:
 
         print("Training")
         self.set_train()
+
         for batch_idx, inputs in enumerate(self.train_loader):
-            # for batch_inputs in inputs:
-            # print(type(x))
-            # print('#######################################')
-            images = inputs['m3d_images']
-            # imobjs = inputs['imobj']
+            self.m3d_dataset.get_index(inputs['mdp_index'])
+            inputs.pop('mdp_index')
+            # next iteration
+            self.iterator, images, imobjs = next_iteration(self.m3d_dataset.loader, self.iterator)
+
             #  learning rate
-            # adjust_lr(self.conf, self.optimizer, batch_idx)
-            #
-            # # forward
-            # self.cls, self.prob, self.bbox_2d, self.bbox_3d, self.feat_size = self.rpn_net(images)
-            #
-            # # loss
-            # self.det_loss, self.det_stats = self.criterion_det(self.cls, self.prob, self.bbox_2d, self.bbox_3d, imobjs, self.feat_size)
-            #
-            # self.m3d_loss = self.det_loss
-            self.m3d_loss = 0
-            # self.stats = self.det_stats
-            #
-            # # backprop
-            # if self.m3d_loss > 0:
-            #
-            #     self.m3d_loss.backward()
-            #
-            #     # # batch skip, simulates larger batches by skipping gradient step
-            #     # if (not 'batch_skip' in self.conf) or ((batch_idx + 1) % self.conf.batch_skip) == 0:
-            #     #     self.optimizer.step()
-            #     #     self.optimizer.zero_grad()
+            adjust_lr(self.conf, self.optimizer, batch_idx)
+
+            # forward
+            cls, prob, bbox_2d, bbox_3d, feat_size = self.rpn_net(images)
+
+            # loss
+            det_loss, det_stats = self.criterion_det(cls, prob, bbox_2d, bbox_3d, imobjs, feat_size)
+
+            self.m3d_loss = det_loss
 
             before_op_time = time.time()
-
             outputs, losses = self.process_batch(inputs, self.m3d_loss)
 
             self.model_optimizer.zero_grad()

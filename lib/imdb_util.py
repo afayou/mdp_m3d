@@ -42,7 +42,7 @@ class Dataset(torch.utils.data.Dataset):
         """
 
         imdb = []
-
+        self.custom_index = 0
         self.video_det = False if not ('video_det' in conf) else conf.video_det
         self.video_count = 1 if not ('video_count' in conf) else conf.video_count
         self.use_3d_for_2d = ('use_3d_for_2d' in conf) and conf.use_3d_for_2d
@@ -198,6 +198,9 @@ class Dataset(torch.utils.data.Dataset):
         if len(cls_not_used) > 0:
             logging.info('Labels not used in training.. {}'.format(cls_not_used))
 
+    def get_index(self, custom_index):
+        self.custom_index = custom_index
+        return self.custom_index
 
     def __getitem__(self, index):
         """
@@ -207,21 +210,20 @@ class Dataset(torch.utils.data.Dataset):
           - applies data augmentation to (im, imobj)
           - converts image to RGB and [B C W H]
         """
-        print('m3d_index %d' % index)
         if not self.video_det:
 
             # read image
-            im = cv2.imread(self.imdb[index].path)
+            im = cv2.imread(self.imdb[self.custom_index].path)
 
         else:
 
             # read images
-            im = cv2.imread(self.imdb[index].path)
+            im = cv2.imread(self.imdb[self.custom_index].path)
 
             video_count = 1 if self.video_count is None else self.video_count
 
             if video_count >= 2:
-                im_pre = cv2.imread(self.imdb[index].path_pre)
+                im_pre = cv2.imread(self.imdb[self.custom_index].path_pre)
 
                 if not im_pre.shape == im.shape:
                     im_pre = cv2.resize(im_pre, (im.shape[1], im.shape[0]))
@@ -230,7 +232,7 @@ class Dataset(torch.utils.data.Dataset):
 
             if video_count >= 3:
 
-                im_pre2 = cv2.imread(self.imdb[index].path_pre2)
+                im_pre2 = cv2.imread(self.imdb[self.custom_index].path_pre2)
 
                 if im_pre2 is None:
                     im_pre2 = im_pre
@@ -242,7 +244,7 @@ class Dataset(torch.utils.data.Dataset):
 
             if video_count >= 4:
 
-                im_pre3 = cv2.imread(self.imdb[index].path_pre3)
+                im_pre3 = cv2.imread(self.imdb[self.custom_index].path_pre3)
 
                 if im_pre3 is None:
                     im_pre3 = im_pre2
@@ -252,15 +254,14 @@ class Dataset(torch.utils.data.Dataset):
 
                 im = np.concatenate((im, im_pre3), axis=2)
 
-
         # transform / data augmentation
-        im, imobj = self.transform(im, deepcopy(self.imdb[index]))
+        im, imobj = self.transform(im, deepcopy(self.imdb[self.custom_index]))
 
         for i in range(int(im.shape[2]/3)):
             # convert to RGB then permute to be [B C H W]
             im[:, :, (i*3):(i*3) + 3] = im[:, :, (i*3+2, i*3+1, i*3)]
         im = np.transpose(im, [2, 0, 1])
-
+        print('m3d_rpn_index: %d' % self.custom_index)
         return im, imobj
 
     @staticmethod
